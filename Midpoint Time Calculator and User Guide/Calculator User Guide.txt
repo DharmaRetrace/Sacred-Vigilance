@@ -1,0 +1,1 @@
+Enter the two time points you want to calculate into the boxes, and click the button below. The calculator will automatically compute the midpoint.
