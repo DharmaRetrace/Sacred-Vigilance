@@ -1,0 +1,143 @@
+# 安装必要的依赖库（如果已经安装则会跳过安装）
+!pip install ephem astral timezonefinder geopy pytz
+
+import datetime
+import pytz
+import ephem
+from astral.sun import sun
+from astral import Observer
+from timezonefinder import TimezoneFinder
+from geopy.geocoders import Nominatim
+
+def main():
+    # 1. 获取用户输入的经纬度
+    lat_str = input("请输入纬度 (例如: 39.90): ").strip()
+    lon_str = input("请输入经度 (例如: 116.40): ").strip()
+    try:
+        lat = float(lat_str)
+        lon = float(lon_str)
+    except ValueError:
+        print("输入的经纬度格式错误，请输入数字。")
+        return
+
+    # 2. 反向地理编码，获取所在地区名称
+    try:
+        geolocator = Nominatim(user_agent="moon_app")
+        location = geolocator.reverse(f"{lat}, {lon}", language="zh")
+    except Exception as e:
+        print("反向地理编码出错:", e)
+        location = None
+
+    if location is not None:
+        print("反向地理编码结果:", location.address)
+    else:
+        print("无法获取所在地区名称")
+
+    # 3. 根据经纬度获取时区
+    tf = TimezoneFinder()
+    tz_name = tf.timezone_at(lat=lat, lng=lon)
+    if tz_name is None:
+        tz_name = "UTC"
+        print("无法确定时区，默认使用 UTC")
+    tz = pytz.timezone(tz_name)
+    print("使用时区:", tz_name)
+
+    # 4. 固定天数为 100 天
+    days = 100
+
+    # 5. 计算连续日出时刻（定义日节点为：当日日出～次日日出）
+    today_local = datetime.datetime.now(tz).date()
+    sunrise_list = []
+    for i in range(days + 1):
+        day = today_local + datetime.timedelta(days=i)
+        obs = Observer(latitude=lat, longitude=lon)
+        s = sun(obs, date=day, tzinfo=tz)
+        sunrise_time = s['sunrise']
+        sunrise_list.append(sunrise_time)
+
+    # 构建日节点（每个节点含一个日期与起始和结束时间）
+    sunrise_nodes = []
+    for i in range(days):
+        node = {
+            'start': sunrise_list[i],
+            'end': sunrise_list[i + 1],
+            'date': sunrise_list[i].date(),
+            'events': []  # 存储落入该节点的月相事件
+        }
+        sunrise_nodes.append(node)
+
+    # 6. 计算月相事件：
+    #
+    # 对于一个完整的月周期，从新月到下个新月，
+    # 包含：新月、第一半月（新月到满月的中点）、满月、第二半月（满月到下个新月的中点）
+    #
+    # 定义计算区间为：第一个日节点起点 ～ 最后一个日节点的结束时刻
+    nodes_start = sunrise_nodes[0]['start']
+    nodes_end = sunrise_nodes[-1]['end']
+    range_start_utc = nodes_start.astimezone(pytz.utc)
+    range_end_utc = nodes_end.astimezone(pytz.utc)
+
+    ephem_start = ephem.Date(range_start_utc)
+    ephem_end = ephem.Date(range_end_utc)
+
+    moon_events = []  # 记录结构：{'time': datetime, 'type': '新月'/'半月'/'满月'}
+
+    # 从区间开始前查找最近一个新月，确保周期完整
+    cur_new = ephem.previous_new_moon(ephem_start)
+    while True:
+        # 当前周期内的新月、满月及下个新月
+        nm_utc = cur_new.datetime().replace(tzinfo=pytz.utc)
+        # 获取当前周期的满月（第一个满月）
+        cur_fm = ephem.next_full_moon(cur_new)
+        fm_utc = cur_fm.datetime().replace(tzinfo=pytz.utc)
+        # 当前周期的下一个新月
+        next_new = ephem.next_new_moon(cur_new)
+        n2_utc = next_new.datetime().replace(tzinfo=pytz.utc)
+
+        # 计算第一半月（新月到满月的中点）
+        half_wax = nm_utc + (fm_utc - nm_utc) / 2
+        # 计算第二半月（满月到下个新月的中点）
+        half_wan = fm_utc + (n2_utc - fm_utc) / 2
+
+        # 若在计算区间内，则依次加入事件
+        if range_start_utc <= nm_utc <= range_end_utc:
+            nm_local = nm_utc.astimezone(tz)
+            moon_events.append({'time': nm_local, 'type': '新月'})
+        if range_start_utc <= half_wax <= range_end_utc:
+            half_wax_local = half_wax.astimezone(tz)
+            moon_events.append({'time': half_wax_local, 'type': '半月'})
+        if range_start_utc <= fm_utc <= range_end_utc:
+            fm_local = fm_utc.astimezone(tz)
+            moon_events.append({'time': fm_local, 'type': '满月'})
+        if range_start_utc <= half_wan <= range_end_utc:
+            half_wan_local = half_wan.astimezone(tz)
+            moon_events.append({'time': half_wan_local, 'type': '半月'})
+
+        # 移至下个周期
+        if next_new > ephem_end:
+            break
+        cur_new = next_new
+
+    # 按时间先后排序月相事件
+    moon_events.sort(key=lambda x: x['time'])
+
+    # 7. 将月相事件划分到各日节点内（判断事件时间是否处于该日节点内）
+    for event in moon_events:
+        for node in sunrise_nodes:
+            if node['start'] <= event['time'] < node['end']:
+                node['events'].append(event)
+                break
+
+    # 8. 输出结果：只输出包含月相事件的日节点（显示节点日期以及事件详情）
+    print("\n包含月相事件的日节点（日期及事件）：")
+    for node in sunrise_nodes:
+        if node['events']:
+            date_str = node['date'].strftime("%Y-%m-%d")
+            print(f"{date_str}:")
+            for event in node['events']:
+                event_str = event['time'].strftime("%Y-%m-%d %H:%M:%S")
+                print(f"   {event['type']} : {event_str}")
+            print()
+
+if __name__ == "__main__":
+    main()
