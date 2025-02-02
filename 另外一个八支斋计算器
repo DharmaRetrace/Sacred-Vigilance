@@ -1,0 +1,111 @@
+# 安装所需依赖
+!pip install ephem astral timezonefinder geopy pytz
+
+import ephem
+from astral import Observer, sun as astral_sun
+from timezonefinder import TimezoneFinder
+from geopy.geocoders import Nominatim
+import pytz
+import datetime
+
+def main():
+    # 用户输入经纬度
+    lat = float(input("纬度（例如：32.02）："))
+    lng = float(input("经度（例如：118.46）："))
+
+    # 反向地理编码获取地址
+    geolocator = Nominatim(user_agent="moon_phase_app")
+    location = geolocator.reverse((lat, lng))
+    print("\n地址信息：", location.address)
+
+    # 确定时区并构建时区对象
+    tf = TimezoneFinder()
+    timezone_str = tf.timezone_at(lng=lng, lat=lat)
+    local_tz = pytz.timezone(timezone_str)
+    print("时区：", timezone_str)
+
+    # 计算未来100天日出时间（生成101个时间点）
+    observer = Observer(latitude=lat, longitude=lng, elevation=0)
+    start_date = datetime.date.today()
+    sunrises = []
+    
+    for i in range(101):
+        current_date = start_date + datetime.timedelta(days=i)
+        sunrise_naive = astral_sun.sunrise(observer, current_date)
+        
+        # 处理时区转换（兼容aware/naive时间）
+        if sunrise_naive.tzinfo is None:
+            sunrise_utc = pytz.utc.localize(sunrise_naive)
+        else:
+            sunrise_utc = sunrise_naive.astimezone(pytz.utc)
+            
+        sunrise_local = sunrise_utc.astimezone(local_tz)
+        sunrises.append(sunrise_local)
+
+    # 构建100个日节点（每个节点包含起止时间和日期）
+    date_nodes = []
+    for i in range(100):
+        start = sunrises[i]
+        end = sunrises[i+1]
+        date_nodes.append({
+            "start": start,
+            "end": end,
+            "date": start.date(),
+            "events": []
+        })
+
+    # 计算月相事件（覆盖所有日节点时间范围）
+    t_start = sunrises[0].astimezone(pytz.utc)  # 转换为UTC用于ephem
+    t_end = sunrises[-1].astimezone(pytz.utc)
+    events = []
+
+    # 获取起始时间前的新月并遍历完整周期
+    current_new_moon = ephem.previous_new_moon(ephem.Date(t_start))
+    while True:
+        # 计算当前新月后的四个关键事件
+        next_first_quarter = ephem.next_first_quarter_moon(current_new_moon)
+        next_full = ephem.next_full_moon(current_new_moon)
+        next_last_quarter = ephem.next_last_quarter_moon(current_new_moon)
+        next_new = ephem.next_new_moon(current_new_moon)
+
+        # 事件列表（类型包括新月、满月和两个半月）
+        phase_events = [
+            (current_new_moon, "新月"),
+            (next_first_quarter, "半月"),
+            (next_full, "满月"),
+            (next_last_quarter, "半月")
+        ]
+
+        # 处理每个事件
+        for event_time, event_type in phase_events:
+            # 转换为Python datetime并检查时间范围
+            dt = ephem.Date(event_time).datetime()
+            utc_dt = pytz.utc.localize(dt)  # ephem返回的是naive UTC时间
+            if t_start <= utc_dt <= t_end:
+                local_dt = utc_dt.astimezone(local_tz)
+                events.append({"time": local_dt, "type": event_type})
+
+        # 终止条件：下一个新月超过结束时间
+        if next_new > ephem.Date(t_end):
+            break
+        current_new_moon = next_new
+
+    # 将月相事件映射到对应日节点
+    for event in events:
+        event_time = event["time"]
+        for node in date_nodes:
+            if node["start"] <= event_time < node["end"]:
+                node["events"].append(event)
+                break  # 确保事件只属于一个节点
+
+    # 输出包含月相事件的日节点
+    print("\n包含月相事件的日节点：")
+    for node in date_nodes:
+        if node["events"]:
+            print(f"\n日期：{node['date']}")
+            for event in node["events"]:
+                time_str = event["time"].strftime("%Y-%m-%d %H:%M:%S %Z")
+                print(f"  {event['type']}：{time_str}")
+
+if __name__ == "__main__":
+    main()
